@@ -17,6 +17,7 @@ from audiobook_generator.tts_providers.base_tts_provider import BaseTTSProvider
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3  # Max_retries constant for network errors
+EDGE_TTS_CHARACTER_LIMIT = 3000
 
 
 async def get_supported_voices():
@@ -55,6 +56,38 @@ class CommWithPauses:
 
         self.loop = asyncio.get_event_loop()
 
+    def _split_text(self, text: str):
+        if len(text) <= EDGE_TTS_CHARACTER_LIMIT:
+            return [text]
+
+        chunks = []
+        while len(text) > 0:
+            if len(text) <= EDGE_TTS_CHARACTER_LIMIT:
+                chunks.append(text)
+                break
+
+            # Find the last sentence-ending punctuation before the limit
+            split_pos = -1
+            # Add more punctuation if necessary
+            punctuations = ['.', '?', '!', '。', '？', '！', "…"]
+            for p in punctuations:
+                pos = text.rfind(p, 0, EDGE_TTS_CHARACTER_LIMIT)
+                if pos > split_pos:
+                    split_pos = pos
+
+            # If no punctuation, find the last space
+            if split_pos == -1:
+                split_pos = text.rfind(' ', 0, EDGE_TTS_CHARACTER_LIMIT)
+
+            # If no space, force split
+            if split_pos == -1:
+                split_pos = EDGE_TTS_CHARACTER_LIMIT - 1
+
+            chunks.append(text[:split_pos+1])
+            text = text[split_pos+1:].lstrip()
+
+        return chunks
+
     async def process_segment(self, segment):
         if re.match(r'\[pause=\d+\]', segment):
             return await asyncio.to_thread(self.generate_silence)
@@ -75,9 +108,17 @@ class CommWithPauses:
 
     async def run_tts(self):
         segments = re.split(r'(\[pause=\d+\])', self.text)
-        tasks = [self.process_segment(segment)
-                 # \p{L}為任何文字字符（所有國家）
-                 for segment in segments if re.search(r'\p{L}', segment)]
+
+        final_segments = []
+        for segment in segments:
+            if not segment:
+                continue
+            if re.match(r'\[pause=\d+\]', segment):
+                final_segments.append(segment)
+            else:
+                final_segments.extend(self._split_text(segment))
+
+        tasks = [self.process_segment(s) for s in final_segments if s.strip()]
         results = await asyncio.gather(*tasks)
         return b''.join(results)
 
